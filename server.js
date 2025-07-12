@@ -1072,7 +1072,6 @@ app.post('/blogsection/blogpost/delete', async (req, res) => {
 
 // --- Blog SVG Preview Proxy ---
 const BLOG_SVG_RAW_BASE = 'https://raw.githubusercontent.com/PtrwTg/Thainest/main/src/components/Blog/';
-const axios = require('axios');
 
 app.get('/blog-svg-preview/:filename', async (req, res) => {
   const filename = req.params.filename;
