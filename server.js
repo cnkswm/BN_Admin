@@ -269,6 +269,91 @@ app.get('/slides', async (req, res) => {
   }
 });
 
+// === Utility สำหรับ import และ imageMap ใน Slider.jsx ===
+function extractSliderImports(content) {
+  // ดึง import SVG ทั้งหมด (เช่น import slide1 from './slide1.svg';)
+  const importRegex = /import\s+(\w+)\s+from\s+'\.\/(slide\d+\.svg)';/g;
+  let match, imports = [];
+  while ((match = importRegex.exec(content))) {
+    imports.push({ varName: match[1], filename: match[2] });
+  }
+  return imports;
+}
+
+function addSliderImport(content, varName, filename) {
+  // เพิ่ม import ใหม่ก่อนบรรทัดแรกที่ไม่ใช่ import
+  const importLine = `import ${varName} from './${filename}';\n`;
+  const importEnd = content.lastIndexOf('import');
+  const nextLine = content.indexOf('\n', importEnd);
+  return content.slice(0, nextLine + 1) + importLine + content.slice(nextLine + 1);
+}
+
+function removeSliderImport(content, filename) {
+  // ลบ import ที่มี filename ตรง
+  const importRegex = new RegExp(`^import\\s+\\w+\\s+from\\s+'\\.\/${filename}';\\s*$`, 'm');
+  return content.replace(importRegex, '');
+}
+
+function extractSliderImageMap(content) {
+  // ดึง object imageMap (key: 'slideX.svg', value: slideX)
+  const mapRegex = /const\s+imageMap\s*=\s*\{([\s\S]*?)\};/m;
+  const match = content.match(mapRegex);
+  if (!match) return {};
+  const objStr = match[1];
+  const entryRegex = /'([^']+)'\s*:\s*(\w+)/g;
+  let m, map = {};
+  while ((m = entryRegex.exec(objStr))) {
+    map[m[1]] = m[2];
+  }
+  return map;
+}
+
+function addSliderImageMapEntry(content, filename, varName) {
+  // ดึง imageMap เดิม
+  const mapRegex = /const\s+imageMap\s*=\s*\{([\s\S]*?)\};/m;
+  const match = content.match(mapRegex);
+  let entries = [];
+  if (match) {
+    const objStr = match[1];
+    // แยกแต่ละ entry (multi-line หรือ inline)
+    const entryRegex = /['"]([^'"]+)['"]\s*:\s*(\w+)/g;
+    let m;
+    while ((m = entryRegex.exec(objStr))) {
+      entries.push({ key: m[1], value: m[2] });
+    }
+  }
+  // เพิ่ม entry ใหม่
+  entries.push({ key: filename, value: varName });
+  // สร้าง object ใหม่แบบ multi-line
+  const newObjStr = entries.map(e => `  '${e.key}': ${e.value},`).join('\n');
+  const newMap = `const imageMap = {\n${newObjStr}\n};`;
+  // แทนที่ imageMap เดิม
+  return content.replace(mapRegex, newMap);
+}
+
+function removeSliderImageMapEntry(content, filename) {
+  // ดึง imageMap เดิม
+  const mapRegex = /const\s+imageMap\s*=\s*\{([\s\S]*?)\};/m;
+  const match = content.match(mapRegex);
+  let entries = [];
+  if (match) {
+    const objStr = match[1];
+    // แยกแต่ละ entry (multi-line หรือ inline)
+    const entryRegex = /['"]([^'"]+)['"]\s*:\s*(\w+)/g;
+    let m;
+    while ((m = entryRegex.exec(objStr))) {
+      if (m[1] !== filename) {
+        entries.push({ key: m[1], value: m[2] });
+      }
+    }
+  }
+  // สร้าง object ใหม่แบบ multi-line
+  const newObjStr = entries.map(e => `  '${e.key}': ${e.value},`).join('\n');
+  const newMap = `const imageMap = {\n${newObjStr}\n};`;
+  // แทนที่ imageMap เดิม
+  return content.replace(mapRegex, newMap);
+}
+
 // POST /slides/add: อัปโหลด SVG + headline ใหม่, backend ตั้งชื่อไฟล์ slideN.svg อัตโนมัติ, เพิ่ม slide ใหม่
 app.post('/slides/add', upload.single('svgfile'), async (req, res) => {
   const { headline } = req.body;
@@ -280,6 +365,7 @@ app.post('/slides/add', upload.single('svgfile'), async (req, res) => {
     const { slides, sha, content, filePath } = await getSlideTexts();
     const newIndex = slides.length + 1;
     const filename = `slide${newIndex}.svg`;
+    const varName = `slide${newIndex}`;
     // อัปโหลดไฟล์ svg ใหม่
     const encodedContent = req.file.buffer.toString('base64');
     const svgPath = `src/components/Slider/${filename}`; // <-- แก้ path
@@ -304,18 +390,21 @@ app.post('/slides/add', upload.single('svgfile'), async (req, res) => {
     const newSlides = [...slides, { headline, image: filename }];
     const newSlideTexts = 'const slideTexts = [\n' + newSlides.map(s => `  { headline: '${s.headline}', image: '${s.image}' },`).join('\n') + '\n];';
     const slideTextsRegex = /const\s+slideTexts\s*=\s*\[[\s\S]*?\];/m;
-    const newContent = content.replace(slideTextsRegex, newSlideTexts);
+    let newContent = content.replace(slideTextsRegex, newSlideTexts);
+    // --- เพิ่ม import และ imageMap ---
+    newContent = addSliderImport(newContent, varName, filename);
+    newContent = addSliderImageMapEntry(newContent, filename, varName);
     // push Slider.jsx
     const encodedSlider = Buffer.from(newContent, 'utf8').toString('base64');
     const sliderUrl = `https://api.github.com/repos/${OWNER}/${REPO}/contents/${filePath}`;
     await axios.put(sliderUrl, {
-      message: 'เพิ่ม slide ใหม่ผ่าน admin tool',
+      message: 'เพิ่ม slide ใหม่ + import + imageMap ผ่าน admin tool',
       content: encodedSlider,
       sha: sha
     }, {
       headers: { Authorization: `token ${GITHUB_TOKEN}` }
     });
-    res.send('เพิ่ม slide ใหม่และอัปโหลด SVG สำเร็จ!');
+    res.send('เพิ่ม slide ใหม่, import, imageMap และอัปโหลด SVG สำเร็จ!');
   } catch (e) {
     res.status(500).send('เพิ่ม slide ไม่สำเร็จ: ' + e.message);
   }
@@ -425,18 +514,26 @@ app.post('/slides/delete', async (req, res) => {
     const newSlides = slides.filter((_, i) => i !== Number(index));
     const newSlideTexts = 'const slideTexts = [\n' + newSlides.map(s => `  { headline: '${s.headline}', image: '${s.image}' },`).join('\n') + '\n];';
     const slideTextsRegex = /const\s+slideTexts\s*=\s*\[[\s\S]*?\];/m;
-    const newContent = content.replace(slideTextsRegex, newSlideTexts);
+    let newContent = content.replace(slideTextsRegex, newSlideTexts);
+    // --- ลบ import และ imageMap ---
+    // หา varName จาก import เดิม
+    const imports = extractSliderImports(content);
+    const found = imports.find(i => i.filename === svgFilename);
+    if (found) {
+      newContent = removeSliderImport(newContent, svgFilename);
+      newContent = removeSliderImageMapEntry(newContent, svgFilename);
+    }
     // push Slider.jsx
     const encodedSlider = Buffer.from(newContent, 'utf8').toString('base64');
     const sliderUrl = `https://api.github.com/repos/${OWNER}/${REPO}/contents/${filePath}`;
     await axios.put(sliderUrl, {
-      message: 'ลบ slide ออกผ่าน admin tool',
+      message: 'ลบ slide, import, imageMap และไฟล์ SVG ผ่าน admin tool',
       content: encodedSlider,
       sha: sha
     }, {
       headers: { Authorization: `token ${GITHUB_TOKEN}` }
     });
-    res.send('ลบ slide และไฟล์ SVG สำเร็จ!');
+    res.send('ลบ slide, import, imageMap และไฟล์ SVG สำเร็จ!');
   } catch (e) {
     res.status(500).send('ลบ slide ไม่สำเร็จ: ' + e.message);
   }
